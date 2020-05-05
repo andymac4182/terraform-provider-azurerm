@@ -109,6 +109,27 @@ func resourceArmCdnEndpoint() *schema.Resource {
 				},
 			},
 
+			"custom_domain": {
+				Type: schema.TypeSet,
+				Required: false,
+				ForceNew: false,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"name": {
+							Type: schema.TypeString,
+							Required: true,
+							ForceNew: true,
+						},
+
+						"host_name": {
+							Type: schema.TypeString,
+							Required: true,
+							ForceNew: false,
+						},
+					},
+				},
+			},
+
 			"origin_path": {
 				Type:     schema.TypeString,
 				Optional: true,
@@ -206,6 +227,7 @@ func resourceArmCdnEndpoint() *schema.Resource {
 }
 
 func resourceArmCdnEndpointCreate(d *schema.ResourceData, meta interface{}) error {
+	customDomainsClient := meta.(*clients.Client).Cdn.CustomDomainsClient
 	endpointsClient := meta.(*clients.Client).Cdn.EndpointsClient
 	profilesClient := meta.(*clients.Client).Cdn.ProfilesClient
 	ctx, cancel := timeouts.ForCreate(meta.(*clients.Client).StopContext, d)
@@ -305,6 +327,13 @@ func resourceArmCdnEndpointCreate(d *schema.ResourceData, meta interface{}) erro
 	}
 
 	d.SetId(*read.ID)
+
+	customDomains := expandAzureRmCdnEndpointCustomDomains(d)
+	if len(customDomains) > 0 {
+		for _, customDomain := range customDomains {
+			customDomainsClient.Create(ctx, resourceGroup, profileName, name, *customDomain.Name, *customDomain.CustomDomainParameters)
+		}
+	}
 
 	return resourceArmCdnEndpointRead(d, meta)
 }
@@ -601,6 +630,36 @@ func expandAzureRmCdnEndpointOrigins(d *schema.ResourceData) []cdn.DeepCreatedOr
 
 	return origins
 }
+
+func expandAzureRmCdnEndpointCustomDomains(d *schema.ResourceData) []CustomDomainResource {
+	configs := d.Get("custom_domain").(*schema.Set).List()
+	customDomains := make([]CustomDomainResource, 0)
+
+	for _, configRaw := range configs {
+		data := configRaw.(map[string]interface{})
+
+		name := data["name"].(string)
+		hostName := data["host_name"].(string)
+
+		customDomain := CustomDomainResource{
+			Name: utils.String(name),
+			CustomDomainPropertiesParameters: &cdn.CustomDomainPropertiesParameters{
+				HostName: utils.String(hostName),
+			},
+		}
+
+		customDomains = append(customDomains, customDomain)
+	}
+
+	return customDomains
+}
+
+type CustomDomainResource struct {
+	// Name - Origin name
+	Name                         *string `json:"name,omitempty"`
+	*cdn.CustomDomainPropertiesParameters `json:"properties,omitempty"`
+}
+
 
 func flattenAzureRMCdnEndpointOrigin(input *[]cdn.DeepCreatedOrigin) []interface{} {
 	results := make([]interface{}, 0)
