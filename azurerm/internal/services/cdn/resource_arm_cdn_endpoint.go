@@ -1,6 +1,7 @@
 package cdn
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -124,7 +125,7 @@ func resourceArmCdnEndpoint() *schema.Resource {
 						"host_name": {
 							Type: schema.TypeString,
 							Required: true,
-							ForceNew: false,
+							ForceNew: true,
 						},
 					},
 				},
@@ -331,7 +332,15 @@ func resourceArmCdnEndpointCreate(d *schema.ResourceData, meta interface{}) erro
 	customDomains := expandAzureRmCdnEndpointCustomDomains(d)
 	if len(customDomains) > 0 {
 		for _, customDomain := range customDomains {
-			customDomainsClient.Create(ctx, resourceGroup, profileName, name, *customDomain.Name, *customDomain.CustomDomainParameters)
+			future, err := customDomainsClient.Create(ctx, resourceGroup, profileName, name, *customDomain.Name, *customDomain.CustomDomainParameters)
+
+			if err != nil {
+				return fmt.Errorf("Error creating CDN Endpoint %q Custom Domain %q (Profile %q / Resource Group %q): %+v", name, *customDomain.Name, profileName, resourceGroup, err)
+			}
+
+			if err = future.WaitForCompletionRef(ctx, endpointsClient.Client); err != nil {
+				return fmt.Errorf("Error waiting for CDN Endpoint %q Custom Domain %q (Profile %q / Resource Group %q) to finish creating: %+v", name, *customDomain.Name, profileName, resourceGroup, err)
+			}
 		}
 	}
 
@@ -420,6 +429,7 @@ func resourceArmCdnEndpointUpdate(d *schema.ResourceData, meta interface{}) erro
 }
 
 func resourceArmCdnEndpointRead(d *schema.ResourceData, meta interface{}) error {
+	customDomainsClient := meta.(*clients.Client).Cdn.CustomDomainsClient
 	client := meta.(*clients.Client).Cdn.EndpointsClient
 	ctx, cancel := timeouts.ForRead(meta.(*clients.Client).StopContext, d)
 	defer cancel()
@@ -471,9 +481,11 @@ func resourceArmCdnEndpointRead(d *schema.ResourceData, meta interface{}) error 
 		}
 
 		origins := flattenAzureRMCdnEndpointOrigin(props.Origins)
-		if err := d.Set("origin", origins); err != nil {
-			return fmt.Errorf("Error setting `origin`: %+v", err)
+		if err := d.Set("origin", origins); err != nil {			return fmt.Errorf("Error setting `origin`: %+v", err)
 		}
+
+		customDomains, err := flattenAzureRmCdnEndpointCustomDomain(id, customDomainsClient, ctx)
+		if err := d.Set("custom_domains", customDomains); err != nil { return fmt.Errorf("Error setting `custom_domains`: %+v", err) }
 
 		flattenedDeliveryPolicies, err := flattenArmCdnEndpointDeliveryPolicy(props.DeliveryPolicy)
 		if err != nil {
@@ -488,6 +500,40 @@ func resourceArmCdnEndpointRead(d *schema.ResourceData, meta interface{}) error 
 	}
 
 	return tags.FlattenAndSet(d, resp.Tags)
+}
+
+func flattenAzureRmCdnEndpointCustomDomain(id *parse.CdnEndpointId, client *cdn.CustomDomainsClient, ctx context.Context) ([]interface{}, error) {
+	result, err := client.ListByEndpoint(ctx, id.ResourceGroup, id.ProfileName, id.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]interface{}, 0)
+
+	input := result.Values()
+
+	if list := input; list != nil {
+		for _, i := range list {
+			name := ""
+			if i.Name != nil {
+				name = *i.Name
+			}
+
+			hostName := ""
+			if props := i; props != nil {
+				if props.HostName != nil {
+					hostName = *props.HostName
+				}
+			}
+
+			results = append(results, map[string]interface{}{
+				"name":       name,
+				"host_name":  hostName,
+			})
+		}
+	}
+
+	return results, nil
 }
 
 func resourceArmCdnEndpointDelete(d *schema.ResourceData, meta interface{}) error {
@@ -643,8 +689,10 @@ func expandAzureRmCdnEndpointCustomDomains(d *schema.ResourceData) []CustomDomai
 
 		customDomain := CustomDomainResource{
 			Name: utils.String(name),
-			CustomDomainPropertiesParameters: &cdn.CustomDomainPropertiesParameters{
-				HostName: utils.String(hostName),
+			CustomDomainParameters: &cdn.CustomDomainParameters{
+				CustomDomainPropertiesParameters: &cdn.CustomDomainPropertiesParameters{
+					HostName: utils.String(hostName),
+				},
 			},
 		}
 
@@ -657,7 +705,7 @@ func expandAzureRmCdnEndpointCustomDomains(d *schema.ResourceData) []CustomDomai
 type CustomDomainResource struct {
 	// Name - Origin name
 	Name                         *string `json:"name,omitempty"`
-	*cdn.CustomDomainPropertiesParameters `json:"properties,omitempty"`
+	*cdn.CustomDomainParameters `json:"properties,omitempty"`
 }
 
 
